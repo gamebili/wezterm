@@ -989,16 +989,23 @@ impl WindowOps for Window {
                             SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER,
                         );
                         wm_paint(hwnd.0, 0, 0, 0);
-                        if let Some(inner) = rc_from_hwnd(hwnd.0) {
-                            let mut inner = inner.borrow_mut();
-                            inner.events.dispatch(WindowEvent::SetInnerSizeCompleted);
-                        }
                     }
                 } else {
                     log::trace!(
                         "ignoring set_inner_size({width}, {height}) call \
                                 because window_state is {window_state:?}"
                     );
+                }
+
+                // Every set_inner_size request must be answered by exactly one
+                // SetInnerSizeCompleted, including the paths where we decline
+                // to resize.  The caller bumps a pending-resize counter before
+                // calling us and suppresses every repaint until that counter
+                // drains back to zero, so a dropped completion leaves the
+                // window painting nothing for the rest of its life.
+                if let Some(inner) = rc_from_hwnd(hwnd.0) {
+                    let mut inner = inner.borrow_mut();
+                    inner.events.dispatch(WindowEvent::SetInnerSizeCompleted);
                 }
             })
             .detach();

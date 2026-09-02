@@ -1012,7 +1012,9 @@ impl TermWindow {
                 Ok(true)
             }
             WindowEvent::SetInnerSizeCompleted => {
-                self.resizes_pending -= 1;
+                // saturating: an unmatched completion would otherwise wrap this
+                // usize around in release builds and suppress painting forever.
+                self.resizes_pending = self.resizes_pending.saturating_sub(1);
                 if self.is_repaint_pending {
                     self.is_repaint_pending = false;
                     if self.webgpu.is_some() {
