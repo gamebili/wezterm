@@ -71,6 +71,10 @@ impl super::TermWindow {
     }
 
     pub fn apply_pending_scale_changes(&mut self) {
+        if !self.pending_scale_changes.is_empty() {
+            // Don't let a lost resize completion swallow the change
+            self.abandon_lost_resizes();
+        }
         while self.resizes_pending == 0 {
             match self.pending_scale_changes.pop_front() {
                 Some(ScaleChange::Relative(change)) => {

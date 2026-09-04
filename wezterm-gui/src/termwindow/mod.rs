@@ -89,6 +89,13 @@ use prevcursor::PrevCursorPos;
 const ATLAS_SIZE: usize = 128;
 const SYSTEM_MENU_OPEN_CONFIG: u16 = 0x1ff0;
 
+/// How long a set_inner_size request may go unanswered before we stop
+/// suppressing repaints on its behalf.  The round trip through the window
+/// backend normally takes a frame or two; anything beyond this means the
+/// completion was lost, and painting once at the old size is a far better
+/// outcome than never painting again.
+const RESIZE_COMPLETION_TIMEOUT: Duration = Duration::from_millis(500);
+
 lazy_static::lazy_static! {
     static ref WINDOW_CLASS: Mutex<String> = Mutex::new(wezterm_gui_subcommands::DEFAULT_WINDOW_CLASS.to_owned());
     static ref POSITION: Mutex<Option<GuiPosition>> = Mutex::new(None);
@@ -414,6 +421,8 @@ pub struct TermWindow {
     pub dimensions: Dimensions,
     pub window_state: WindowState,
     pub resizes_pending: usize,
+    /// When the oldest still-unanswered set_inner_size request was made
+    resize_requested_at: Option<Instant>,
     is_repaint_pending: bool,
     pending_scale_changes: LinkedList<resize::ScaleChange>,
     /// Terminal dimensions
@@ -741,6 +750,7 @@ impl TermWindow {
             dimensions,
             window_state: WindowState::default(),
             resizes_pending: 0,
+            resize_requested_at: None,
             is_repaint_pending: false,
             pending_scale_changes: LinkedList::new(),
             terminal_size,
@@ -1015,6 +1025,13 @@ impl TermWindow {
                 // saturating: an unmatched completion would otherwise wrap this
                 // usize around in release builds and suppress painting forever.
                 self.resizes_pending = self.resizes_pending.saturating_sub(1);
+                // Whatever is still outstanding gets a deadline of its own
+                // rather than inheriting the one we just satisfied.
+                self.resize_requested_at = if self.resizes_pending == 0 {
+                    None
+                } else {
+                    Some(Instant::now())
+                };
                 if self.is_repaint_pending {
                     self.is_repaint_pending = false;
                     if self.webgpu.is_some() {
@@ -1054,13 +1071,16 @@ impl TermWindow {
                 Ok(true)
             }
             WindowEvent::NeedRepaint => {
-                if self.resizes_pending > 0 {
+                if self.resizes_pending > 0 && !self.abandon_lost_resizes() {
                     self.is_repaint_pending = true;
                     Ok(true)
-                } else if self.webgpu.is_some() {
-                    self.do_paint_webgpu()
                 } else {
-                    Ok(self.do_paint(window))
+                    self.is_repaint_pending = false;
+                    if self.webgpu.is_some() {
+                        self.do_paint_webgpu()
+                    } else {
+                        Ok(self.do_paint(window))
+                    }
                 }
             }
             WindowEvent::Notification(item) => {
@@ -1415,7 +1435,30 @@ impl TermWindow {
 
     fn set_inner_size(&mut self, window: &Window, width: usize, height: usize) {
         self.resizes_pending += 1;
+        self.resize_requested_at.get_or_insert_with(Instant::now);
         window.set_inner_size(width, height);
+    }
+
+    /// True if a set_inner_size request has gone unanswered for long enough
+    /// that its SetInnerSizeCompleted must have been lost.  Clears the pending
+    /// state, because both painting and apply_pending_scale_changes stall on
+    /// the counter and would otherwise stay stalled for the life of the
+    /// window.
+    pub fn abandon_lost_resizes(&mut self) -> bool {
+        match self.resize_requested_at {
+            Some(requested_at) if requested_at.elapsed() >= RESIZE_COMPLETION_TIMEOUT => {
+                log::warn!(
+                    "{} pending resize(s) went unanswered for {:?}; \
+                     resuming without them",
+                    self.resizes_pending,
+                    requested_at.elapsed()
+                );
+                self.resizes_pending = 0;
+                self.resize_requested_at = None;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Take care to remove our panes from the mux, otherwise

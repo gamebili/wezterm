@@ -963,10 +963,31 @@ impl WindowOps for Window {
     }
 
     fn set_inner_size(&self, width: usize, height: usize) {
+        // Every set_inner_size request must be answered by exactly one
+        // SetInnerSizeCompleted.  The caller bumps a pending-resize counter
+        // before calling us and suppresses every repaint until that counter
+        // drains back to zero, so a dropped completion leaves the window
+        // painting nothing for the rest of its life.  Carrying the completion
+        // in a guard answers the request from every exit path, including the
+        // branch where we decline to resize, an unwind out of the resize, and
+        // the case where the closure below never runs at all because the
+        // window has already gone away.
+        struct Completion(HWindow);
+        impl Drop for Completion {
+            fn drop(&mut self) {
+                if let Some(inner) = rc_from_hwnd(self.0 .0) {
+                    let mut inner = inner.borrow_mut();
+                    inner.events.dispatch(WindowEvent::SetInnerSizeCompleted);
+                }
+            }
+        }
+        let completion = Completion(self.0);
+
         Connection::with_window_inner(self.0, move |inner| {
             let hwnd = inner.hwnd;
             let decorations = inner.config.window_decorations;
             promise::spawn::spawn(async move {
+                let _completion = completion;
                 log::trace!("set_inner_size called with {width}x{height}");
                 let frame_dpi = unsafe { GetDpiForWindow(hwnd.0) };
                 let (width, height) = adjust_client_to_window_dimensions(
@@ -995,17 +1016,6 @@ impl WindowOps for Window {
                         "ignoring set_inner_size({width}, {height}) call \
                                 because window_state is {window_state:?}"
                     );
-                }
-
-                // Every set_inner_size request must be answered by exactly one
-                // SetInnerSizeCompleted, including the paths where we decline
-                // to resize.  The caller bumps a pending-resize counter before
-                // calling us and suppresses every repaint until that counter
-                // drains back to zero, so a dropped completion leaves the
-                // window painting nothing for the rest of its life.
-                if let Some(inner) = rc_from_hwnd(hwnd.0) {
-                    let mut inner = inner.borrow_mut();
-                    inner.events.dispatch(WindowEvent::SetInnerSizeCompleted);
                 }
             })
             .detach();
