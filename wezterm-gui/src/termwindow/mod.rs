@@ -628,6 +628,49 @@ impl TermWindow {
 
         Ok(())
     }
+
+    /// Rebuild the render state against a freshly recreated OpenGL context
+    /// (see `WindowEvent::OpenGLContextRecreated`).  Unlike `created`, this
+    /// never panics: if the new render state cannot be built we keep the
+    /// previous one, so a failed recovery is no worse than the frozen picture
+    /// we were trying to fix.
+    fn recreate_gl_render_state(
+        &mut self,
+        gl: Rc<glium::backend::Context>,
+        window: &Window,
+    ) {
+        let ctx = RenderContext::Glium(Rc::clone(&gl));
+        let render_info = ctx.renderer_info();
+        match RenderState::new(ctx, &self.fonts, &self.render_metrics, ATLAS_SIZE) {
+            Ok(render_state) => {
+                log::warn!(
+                    "rebuilt OpenGL render state after a display change: {}",
+                    render_info
+                );
+                self.opengl_info.replace(render_info);
+                self.gl.replace(gl);
+                // Replacing render_state drops the previous one (and, with the
+                // gl replacement above, the previous context) only after the
+                // new state has been built successfully.
+                self.render_state.replace(render_state);
+                // The glyph atlas and shaped-line caches referenced GPU
+                // resources on the old context; drop them so they are rebuilt
+                // against the new one.
+                self.shape_generation += 1;
+                self.shape_cache.borrow_mut().clear();
+                self.line_to_ele_shape_cache.borrow_mut().clear();
+                self.invalidate_fancy_tab_bar();
+                self.invalidate_modal();
+                window.invalidate();
+            }
+            Err(err) => {
+                log::error!(
+                    "failed to rebuild render state after a display change: {err:#}; \
+                     keeping the previous context"
+                );
+            }
+        }
+    }
 }
 
 impl TermWindow {
@@ -1082,6 +1125,10 @@ impl TermWindow {
                         Ok(self.do_paint(window))
                     }
                 }
+            }
+            WindowEvent::OpenGLContextRecreated(gl) => {
+                self.recreate_gl_render_state(gl.0, window);
+                Ok(true)
             }
             WindowEvent::Notification(item) => {
                 if let Ok(notif) = item.downcast::<TermWindowNotif>() {

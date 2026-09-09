@@ -1675,6 +1675,49 @@ unsafe fn wm_set_focus(
     None
 }
 
+/// A display topology change -- a resolution change, a monitor added or
+/// removed, or a remote-desktop / virtual-display driver reconfiguring the
+/// desktop -- can leave our OpenGL drawable bound to a surface that is no
+/// longer composited for this window.  The context keeps rendering and
+/// SwapBuffers keeps succeeding, but nothing reaches the screen: the picture
+/// freezes for the life of the window while the message loop, mux, pty and
+/// title bar all stay live.  `GetGraphicsResetStatus` reports no reset in this
+/// case, so `is_context_lost` never trips and we would otherwise never
+/// recover.  Recreate the GL context so it binds to the current drawable and
+/// hand it to the application to rebuild its render state.  On any failure we
+/// fall back to a plain repaint, leaving behaviour no worse than before.
+unsafe fn wm_displaychange(
+    hwnd: HWND,
+    _msg: UINT,
+    _wparam: WPARAM,
+    _lparam: LPARAM,
+) -> Option<LRESULT> {
+    let inner = rc_from_hwnd(hwnd)?;
+    let mut inner = inner.borrow_mut();
+    if inner.gl_state.is_some() {
+        log::warn!(
+            "WM_DISPLAYCHANGE: recreating the OpenGL context to recover from a \
+             possibly orphaned drawable"
+        );
+        match inner.enable_opengl() {
+            Ok(gl) => {
+                inner
+                    .events
+                    .dispatch(WindowEvent::OpenGLContextRecreated(
+                        crate::RecreatedGlContext(gl),
+                    ));
+            }
+            Err(err) => {
+                log::error!("WM_DISPLAYCHANGE: failed to recreate the OpenGL context: {err:#}");
+                inner.events.dispatch(WindowEvent::NeedRepaint);
+            }
+        }
+    } else {
+        inner.events.dispatch(WindowEvent::NeedRepaint);
+    }
+    None
+}
+
 unsafe fn wm_kill_focus(
     hwnd: HWND,
     _msg: UINT,
@@ -3027,6 +3070,7 @@ unsafe fn do_wnd_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> 
         WM_PAINT => wm_paint(hwnd, msg, wparam, lparam),
         WM_ENTERSIZEMOVE | WM_EXITSIZEMOVE => wm_enter_exit_size_move(hwnd, msg, wparam, lparam),
         WM_WINDOWPOSCHANGED => wm_windowposchanged(hwnd, msg, wparam, lparam),
+        WM_DISPLAYCHANGE => wm_displaychange(hwnd, msg, wparam, lparam),
         WM_SETFOCUS => wm_set_focus(hwnd, msg, wparam, lparam),
         WM_KILLFOCUS => wm_kill_focus(hwnd, msg, wparam, lparam),
         WM_DEADCHAR | WM_KEYDOWN | WM_KEYUP | WM_SYSCHAR | WM_CHAR | WM_IME_CHAR | WM_SYSKEYUP

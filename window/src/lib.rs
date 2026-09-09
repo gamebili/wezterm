@@ -154,6 +154,17 @@ pub enum DeadKeyStatus {
     Composing(String),
 }
 
+/// Wraps a recreated OpenGL context for `WindowEvent::OpenGLContextRecreated`.
+/// The wrapper exists so that `WindowEvent` can keep deriving `Debug` even
+/// though `glium::backend::Context` does not implement it.
+pub struct RecreatedGlContext(pub Rc<glium::backend::Context>);
+
+impl std::fmt::Debug for RecreatedGlContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("RecreatedGlContext")
+    }
+}
+
 #[derive(Debug)]
 pub enum WindowEvent {
     /// Called when the window close button is clicked.
@@ -178,6 +189,12 @@ pub enum WindowEvent {
     /// Called when the window has been invalidated and needs to
     /// be repainted
     NeedRepaint,
+
+    /// The platform had to recreate the OpenGL context (for example after a
+    /// display topology change on Windows orphaned the previous drawable).
+    /// Carries the freshly created context so the application can rebuild its
+    /// render state against it.
+    OpenGLContextRecreated(RecreatedGlContext),
 
     /// Called when the window gains/loses focus
     FocusChanged(bool),

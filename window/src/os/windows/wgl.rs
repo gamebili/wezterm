@@ -238,50 +238,60 @@ impl GlState {
 
         attribs.push(0);
 
-        let mut format_id = 0;
-        let mut num_formats = 0;
+        // On Windows a window's pixel format can be set only once for the
+        // lifetime of that window.  When we recreate the context on an
+        // existing window -- eg: to recover from a display topology change
+        // that orphaned the previous drawable -- the format is already set and
+        // calling SetPixelFormat again would fail.  Reuse the existing format
+        // in that case rather than bailing.
+        if unsafe { GetPixelFormat(hdc) } == 0 {
+            let mut format_id = 0;
+            let mut num_formats = 0;
 
-        let res = unsafe {
-            wgl.ext.as_ref().unwrap().ChoosePixelFormatARB(
-                hdc as _,
-                attribs.as_ptr(),
-                null(),
-                1,
-                &mut format_id,
-                &mut num_formats,
-            )
-        };
-        if res == 0 {
-            anyhow::bail!("ChoosePixelFormatARB returned 0");
-        }
+            let res = unsafe {
+                wgl.ext.as_ref().unwrap().ChoosePixelFormatARB(
+                    hdc as _,
+                    attribs.as_ptr(),
+                    null(),
+                    1,
+                    &mut format_id,
+                    &mut num_formats,
+                )
+            };
+            if res == 0 {
+                anyhow::bail!("ChoosePixelFormatARB returned 0");
+            }
 
-        if num_formats == 0 {
-            anyhow::bail!("ChoosePixelFormatARB returned 0 formats");
-        }
+            if num_formats == 0 {
+                anyhow::bail!("ChoosePixelFormatARB returned 0 formats");
+            }
 
-        let mut pfd: PIXELFORMATDESCRIPTOR = unsafe { std::mem::zeroed() };
+            let mut pfd: PIXELFORMATDESCRIPTOR = unsafe { std::mem::zeroed() };
 
-        let res = unsafe {
-            DescribePixelFormat(
-                hdc,
-                format_id,
-                std::mem::size_of::<PIXELFORMATDESCRIPTOR>() as _,
-                &mut pfd,
-            )
-        };
-        if res == 0 {
-            anyhow::bail!(
-                "DescribePixelFormat function failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
+            let res = unsafe {
+                DescribePixelFormat(
+                    hdc,
+                    format_id,
+                    std::mem::size_of::<PIXELFORMATDESCRIPTOR>() as _,
+                    &mut pfd,
+                )
+            };
+            if res == 0 {
+                anyhow::bail!(
+                    "DescribePixelFormat function failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
 
-        let res = unsafe { SetPixelFormat(hdc, format_id, &pfd) };
-        if res == 0 {
-            anyhow::bail!(
-                "SetPixelFormat function failed: {}",
-                std::io::Error::last_os_error()
-            );
+            let res = unsafe { SetPixelFormat(hdc, format_id, &pfd) };
+            if res == 0 {
+                anyhow::bail!(
+                    "SetPixelFormat function failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        } else {
+            log::trace!("reusing existing pixel format on hdc for context recreation");
         }
 
         let mut attribs = vec![
@@ -360,9 +370,14 @@ impl GlState {
             dwVisibleMask: 0,
             dwDamageMask: 0,
         };
-        let format = unsafe { ChoosePixelFormat(hdc, &pfd) };
-        unsafe {
-            SetPixelFormat(hdc, format, &pfd);
+        // See create_ext: the pixel format can only be set once per window, so
+        // when recreating a context on an existing window we reuse the format
+        // that is already set.
+        if unsafe { GetPixelFormat(hdc) } == 0 {
+            let format = unsafe { ChoosePixelFormat(hdc, &pfd) };
+            unsafe {
+                SetPixelFormat(hdc, format, &pfd);
+            }
         }
 
         let rc = unsafe { wgl.wgl.CreateContext(hdc as *mut _) };
